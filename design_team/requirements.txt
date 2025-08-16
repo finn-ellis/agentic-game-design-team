@@ -1,0 +1,8 @@
+google-adk
+python-dotenv
+sqlalchemy
+aiosqlite
+fastapi
+uvicorn[standard]
+websockets
+pydantic

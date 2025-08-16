@@ -11,8 +11,8 @@ from google.adk.tools.agent_tool import AgentTool
 from google.adk.events import Event, EventActions
 from pydantic import BaseModel, Field
 from google.genai import types
-from .config import config
-from .team_agreement import team_agreement
+from config import config
+from team_agreement import team_agreement
 
 # --- Constants ---
 
@@ -34,7 +34,7 @@ class Feedback(BaseModel):
 # --- Agents ---
 lead_game_designer = LlmAgent(
 	name="LeadGameDesigner",
-	model=config.worker_model,
+	model=config.designer_model,
 	description="Generates or refines the existing game design plan.",
 	instruction=f"""
 	You are a game design expert. Your job is to create a game design overview.
@@ -52,8 +52,10 @@ lead_game_designer = LlmAgent(
 	d. Core Fantasy
 	e. Target Audience (self-determination theory, player types & archetype taxonomy)
 	f. Design Pillars
+    g. Extra comments, thoughts, direction
 	""",
 	include_contents='default',
+    output_key="game_overview",
 	planner=BuiltInPlanner(
         thinking_config=types.ThinkingConfig(
             include_thoughts=False, # irrelevant to the team?
@@ -86,7 +88,7 @@ gameplay_designer = LlmAgent(
 	include_contents='default',
 	planner=BuiltInPlanner(
         thinking_config=types.ThinkingConfig(
-            include_thoughts=False, # irrelevant to the team?
+            include_thoughts=True, # irrelevant to the team?
             thinking_budget=1024,
         )
     ),
@@ -117,12 +119,12 @@ gameplay_evaluator = LlmAgent(
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     output_key="gameplay_evaluation",
-	planner=BuiltInPlanner(
-        thinking_config=types.ThinkingConfig(
-            include_thoughts=False,
-            thinking_budget=1024,
-        )
-    ),
+	# planner=BuiltInPlanner(
+    #     thinking_config=types.ThinkingConfig(
+    #         include_thoughts=False,
+    #         thinking_budget=1024,
+    #     )
+    # ),
 )
 
 # --- Custom Agent for Loop Control ---
@@ -209,16 +211,24 @@ art_director = LlmAgent(
 
 marketing_director = LlmAgent(
 	name="MarketingDirector",
-	model=config.worker_model,
+	model=config.designer_model,
 	description="Crafts the marketing strategy and messaging for the game.",
 	instruction=f"""
-	You are a video game Art Director responsible for the visual and narrative aspects of the game. Your task is to ensure that the game's art style, character designs, and narrative elements are cohesive and enhance the overall player experience.
-    
+	You are a relentless video game Marketing Director.
+    Your task is to create a comprehensive marketing strategy that aligns with the game's vision and target audience.
+    Discover intelligent moments during gameplay to place monetization.
+    Analyze the target audience and tailor advertising to their preferences.
+
 	{ team_agreement }
     
     ### TASK:
     1. Review the `{{game_overview}}`, `{{gameplay_plan}}`, and `{{art_narrative_plan}}`
     2. Generate a business strategy for the game covering monetization and marketing. Tailor this to the Roblox platform.
+
+    ### Final Output:
+    A comprehensive marketing strategy that includes:
+    a. Monetization Strategy
+    b. Marketing Plan
 	""",
     output_key="marketing_strategy",
 	include_contents='default',
@@ -230,6 +240,42 @@ marketing_director = LlmAgent(
     ),
 )
 
+producer = LlmAgent(
+	name="Producer",
+	model=config.designer_model,
+	description="Plans a timeline and task list given a game design document.",
+	instruction=f"""
+	You are a meticulously organized video game producer. Review the information and develop a game plan for tackling all of the required tasks.
+
+	{ team_agreement }
+
+    ### INPUT DATA:
+    *   Game Overview: `{{game_overview}}`
+    *   Gameplay Plan: `{{gameplay_plan}}`
+    *   Art and Narrative Plan: `{{art_narrative_plan}}`
+    *   Marketing Strategy: `{{marketing_strategy}}`
+    
+    ### TASK:
+    Your task is to use the provided information to generate a detailed project plan, including task list and timeline.
+
+    ### Final Output:
+    A comprehensive production plan that includes:
+    a. Task List
+    b. Timeline
+    c. Milestones
+    d. MVP Definition (conservative)
+	""",
+    output_key="production_plan",
+	include_contents='default',
+	planner=BuiltInPlanner(
+        thinking_config=types.ThinkingConfig(
+            include_thoughts=False,
+            thinking_budget=1024,
+        )
+    ),
+)
+
+# Plan Synthesizer not very useful, best to just unify the sections with code at the end.. probably just have this agent call a tool
 plan_synthesizer = LlmAgent(
 	name="PlanSynthesizer",
 	model=config.worker_model,
@@ -241,9 +287,10 @@ plan_synthesizer = LlmAgent(
     *   Gameplay Plan: `{gameplay_plan}`
     *   Art and Narrative Plan: `{art_narrative_plan}`
 	*   Marketing Strategy: `{marketing_strategy}`
+    *   Production Plan: `{production_plan}`
     
     ## Final Instructions:
-    Generate a comprehensive Game Design Document that incorporates all the above elements.
+    Generate a comprehensive Game Design Document that incorporates all the above elements. Return only this document.
 	""",
 	include_contents='default',
 	# planner=BuiltInPlanner(
@@ -254,6 +301,7 @@ plan_synthesizer = LlmAgent(
     # ),
 )
 
+# Idea: Use LoopAgent with human-in-the-loop tool for iteration and refinement
 project_pipeline = SequentialAgent(
 	name="ProjectPipeline",
 	sub_agents=[
@@ -269,7 +317,8 @@ project_pipeline = SequentialAgent(
 		),
 		art_director,
 		marketing_director,
-		plan_synthesizer
+        producer,
+		# plan_synthesizer
 	]
 )
 
@@ -282,17 +331,20 @@ interactive_planner_agent = LlmAgent(
     instruction=f"""
     You are a game design assistant. Your primary function is to convert ANY user request into a game design overview.
 
+    { team_agreement }
+    
+    **Tone:** Sophisticated, inquisitive, professional, creative.
+
     Your workflow is:
 	1. **Discuss:** Collaborate with the user to gather requirements and understand their vision.
-    1.  **Plan:** Use `lead_game_designer` to create a game design overview and present it to the user.
-    2.  **Refine:** Incorporate user feedback until the plan is approved.
+    1.  **Plan:** You MUST use `lead_game_designer` to create a game design overview and present it to the user (stored in the `game_overview` state key).
+    2.  **Refine:** Incorporate user feedback until the plan is approved. ALWAYS call `lead_game_designer` to do this. Be sure to ask the user for confirmation when you are clear on the vision.
     3.  **Execute:** Once the user gives EXPLICIT approval (e.g., "looks good, run it"), you MUST delegate the task to the `project_pipeline` agent, passing the approved plan.
 
-    Your job is to Plan, Refine, and Delegate.
+    Your job is to Plan, Refine, and Delegate. When a `game_overview` is generated, you MUST return it in your response.
     """,
     sub_agents=[project_pipeline],
     tools=[AgentTool(lead_game_designer)],
-    output_key="game_overview",
 )
 
 root_agent = interactive_planner_agent
